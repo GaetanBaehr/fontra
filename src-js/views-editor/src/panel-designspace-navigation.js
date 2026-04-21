@@ -35,6 +35,7 @@ import {
 import { GlyphSource, Layer, StaticGlyph } from "@fontra/core/var-glyph.js";
 import {
   isLocationAtDefault,
+  locationToName,
   locationToString,
   makeSparseLocation,
   mapAxesFromUserSpaceToSourceSpace,
@@ -45,7 +46,12 @@ import { IconButton } from "@fontra/web-components/icon-button.js";
 import { InlineSVG } from "@fontra/web-components/inline-svg.js";
 import { showMenu } from "@fontra/web-components/menu-panel.js";
 import { dialog, dialogSetup, message } from "@fontra/web-components/modal-dialog.js";
-import { Accordion } from "@fontra/web-components/ui-accordion.js";
+import {
+  Accordion,
+  groupAccordionHeaderButtons,
+  makeAccordionHeaderButton,
+  makeClickableIconHeader,
+} from "@fontra/web-components/ui-accordion.js";
 
 import { NumberFormatter } from "@fontra/core/formatters.js";
 import Panel from "./panel.js";
@@ -71,7 +77,6 @@ export default class DesignspaceNavigationPanel extends Panel {
 
   constructor(editorController) {
     super(editorController);
-    this.fontController = this.editorController.fontController;
     this.sceneSettingsController = this.editorController.sceneSettingsController;
     this.sceneSettings = this.editorController.sceneSettingsController.model;
     this.sceneModel = this.editorController.sceneController.sceneModel;
@@ -162,7 +167,10 @@ export default class DesignspaceNavigationPanel extends Panel {
               const url = new URL(window.location);
               url.pathname = url.pathname.replace("/editor.html", "/fontinfo.html");
               url.hash = "#axes-panel";
-              window.open(url.toString());
+              window.open(
+                url.toString(),
+                `fontra.fontinfo.${this.editorController.projectIdentifier}`
+              );
             },
           }),
           makeAccordionHeaderButton({
@@ -308,7 +316,7 @@ export default class DesignspaceNavigationPanel extends Panel {
     this.sceneSettingsController.addKeyListener(
       ["selectedGlyph", "selectedGlyphName"],
       async (event) => {
-        await this._updateAxes();
+        await this._updateGlyphAxes();
         await this._updateSources();
         await this._updateInterpolationErrorInfo();
         await this._updateSourceLayersList();
@@ -854,6 +862,11 @@ export default class DesignspaceNavigationPanel extends Panel {
   }
 
   async _updateAxes() {
+    await this._updateFontAxes();
+    await this._updateGlyphAxes();
+  }
+
+  async _updateFontAxes() {
     const fontAxesSourceSpace = mapAxesFromUserSpaceToSourceSpace(this.fontAxes);
     const fontAxes = this.sceneSettings.fontAxesUseSourceCoordinates
       ? fontAxesSourceSpace
@@ -865,7 +878,9 @@ export default class DesignspaceNavigationPanel extends Panel {
       this.fontAxesElement.phantomAxes = [];
     }
     this._setFontLocationValues();
+  }
 
+  async _updateGlyphAxes() {
     const varGlyphController =
       await this.sceneModel.getSelectedVariableGlyphController();
 
@@ -1255,7 +1270,7 @@ export default class DesignspaceNavigationPanel extends Panel {
       !selectedItem ||
       selectedItem.isFontSource ||
       !selectedItem.active ||
-      !varGlyphController.sources[selectedItem.sourceIndex]
+      !varGlyphController?.sources[selectedItem.sourceIndex]
     ) {
       this.sceneSettings.editingLayers = {};
     } else {
@@ -1594,7 +1609,7 @@ export default class DesignspaceNavigationPanel extends Panel {
     const suggestedSourceName =
       fontSourceName && !hasGlyphLocation
         ? fontSourceName
-        : suggestedSourceNameFromLocation(makeSparseLocation(location, locationAxes));
+        : locationToName(makeSparseLocation(location, locationAxes));
     const suggestedLayerName =
       locationBase && !hasGlyphLocation
         ? locationBase
@@ -1645,7 +1660,7 @@ export default class DesignspaceNavigationPanel extends Panel {
       }
       nameController.model.sourceName = "";
 
-      const suggestedSourceName = suggestedSourceNameFromLocation(
+      const suggestedSourceName = locationToName(
         makeSparseLocation(locationController.model, locationAxes)
       );
 
@@ -1666,7 +1681,7 @@ export default class DesignspaceNavigationPanel extends Panel {
       }
 
       if (!nameController.model.locationBase || isGlyphAxisChange) {
-        const suggestedSourceName = suggestedSourceNameFromLocation(
+        const suggestedSourceName = locationToName(
           makeSparseLocation(locationController.model, locationAxes)
         );
         if (
@@ -2140,17 +2155,6 @@ function foldNLIAxes(axes) {
   return Object.values(axisInfo);
 }
 
-function suggestedSourceNameFromLocation(location) {
-  return (
-    Object.entries(location)
-      .map(([name, value]) => {
-        value = round(value, 1);
-        return `${name}=${value}`;
-      })
-      .join(",") || "default"
-  );
-}
-
 function getGlyphAxisNamesSet(glyph) {
   return new Set(glyph.axes.map((axis) => axis.name));
 }
@@ -2294,57 +2298,6 @@ function statusListCell(item, colDesc) {
 
 function cellColorStyle(color) {
   return `background-color: ${rgbaToCSS(color)}; width: 100%;`;
-}
-
-function makeClickableIconHeader(iconPath, onClick) {
-  const focus = new FocusKeeper();
-  return html.div(
-    {
-      class: "clickable-icon-header",
-      style: "height: 1.2em; width: 1.2em;",
-      onmousedown: focus.save,
-      onclick: (event) => {
-        onClick(event);
-        focus.restore();
-      },
-    },
-    [
-      html.createDomElement("inline-svg", {
-        src: iconPath,
-      }),
-    ]
-  );
-}
-
-function groupAccordionHeaderButtons(buttons) {
-  return html.div(
-    {
-      style: `display: grid;
-      grid-template-columns: repeat(${buttons.length}, auto);
-      gap: 0.15em;
-      `,
-    },
-    buttons
-  );
-}
-
-function makeAccordionHeaderButton(button) {
-  const options = {
-    style: "width: 1.4em; height: 1.4em;",
-    src: `/tabler-icons/${button.icon}.svg`,
-    onclick: button.onclick,
-  };
-
-  if (button.id) {
-    options.id = button.id;
-  }
-
-  if (button.tooltip) {
-    options["data-tooltip"] = button.tooltip;
-    options["data-tooltipposition"] = "bottom";
-  }
-
-  return html.createDomElement("icon-button", options);
 }
 
 function getSourceCompareFunc(locationProperty, axisNames) {

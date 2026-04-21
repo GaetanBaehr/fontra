@@ -11,12 +11,14 @@ from functools import cached_property
 from typing import Any, AsyncGenerator, ClassVar
 
 from ...backends import getFileSystemBackend, newFileSystemBackend
+from ...backends.base import ReadableBaseBackend
 from ...backends.copy import copyFont
 from ...backends.filenames import stringToFileName
 from ...backends.null import NullBackend
 from ...core.async_property import async_cached_property
 from ...core.classes import (
     Axes,
+    ConditionalSubstitutions,
     FontInfo,
     FontSource,
     ImageData,
@@ -89,7 +91,7 @@ class FontraWrite:
 
 
 @dataclass(kw_only=True)
-class BaseFilter:
+class BaseFilter(ReadableBaseBackend):
     input: ReadableFontBackend = field(init=False, default=NullBackend())
     actionName: ClassVar[str]
 
@@ -169,6 +171,12 @@ class BaseFilter:
         customData = await self.validatedInput.getCustomData()
         return await self.processCustomData(customData)
 
+    async def getConditionalSubstitutions(self) -> ConditionalSubstitutions:
+        conditionalSubstitutions = (
+            await self.validatedInput.getConditionalSubstitutions()
+        )
+        return await self.processConditionalSubstitutions(conditionalSubstitutions)
+
     async def getUnitsPerEm(self) -> int:
         unitsPerEm = await self.validatedInput.getUnitsPerEm()
         return await self.processUnitsPerEm(unitsPerEm)
@@ -177,6 +185,10 @@ class BaseFilter:
         assert hasattr(self.validatedInput, "getBackgroundImage")
         imageData = await self.validatedInput.getBackgroundImage(imageIdentifier)
         return await self.processBackgroundImage(imageData)
+
+    async def getGlyphInfos(self) -> dict[str, Any]:
+        glyphInfos = await self.validatedInput.getGlyphInfos()
+        return await self.processGlyphInfos(glyphInfos)
 
     # Default no-op process methods, to be overridden.
 
@@ -210,6 +222,12 @@ class BaseFilter:
     async def processCustomData(self, customData):
         return customData
 
+    async def processConditionalSubstitutions(
+        self,
+        conditionalSubstitutions: ConditionalSubstitutions,
+    ) -> ConditionalSubstitutions:
+        return conditionalSubstitutions
+
     async def processUnitsPerEm(self, unitsPerEm: int) -> int:
         return unitsPerEm
 
@@ -217,6 +235,9 @@ class BaseFilter:
         self, imageData: ImageData | None
     ) -> ImageData | None:
         return imageData
+
+    async def processGlyphInfos(self, glyphInfos):
+        return glyphInfos
 
 
 @registerFilterAction("memory-cache")
