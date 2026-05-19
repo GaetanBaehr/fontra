@@ -99,6 +99,37 @@ import TextEntryPanel from "./panel-text-entry.js";
 import TransformationPanel from "./panel-transformation.js";
 import Panel from "./panel.js";
 
+import {
+  glyphSelector,
+  registerVisualizationLayerDefinition,
+} from "./visualization-layer-definitions.js";
+
+registerVisualizationLayerDefinition({
+  identifier: "fontra.select-contour-line",
+  name: "select-contour-line",
+  selectionFunc: glyphSelector("editing"),
+  userSwitchable: false,
+  defaultOn: true,
+  zIndex: 500,
+  screenParameters: { strokeWidth: 1 },
+  colors: { lineColor: "#0008" },
+  colorsDarkMode: { lineColor: "#FFF8" },
+  draw: (context, positionedGlyph, parameters, model, controller) => {
+    if (!selectContourLineState) return;
+    const { from, to } = selectContourLineState;
+    context.strokeStyle = parameters.lineColor;
+    context.lineWidth = parameters.strokeWidth;
+    context.setLineDash([4, 4]);
+    context.beginPath();
+    context.moveTo(from.x, from.y);
+    context.lineTo(to.x, to.y);
+    context.stroke();
+    context.setLineDash([]);
+  },
+});
+
+let selectContourLineState = null;
+
 const MIN_CANVAS_SPACE = 200;
 
 const PASTE_BEHAVIOR_REPLACE = "replace";
@@ -273,6 +304,10 @@ export class EditorController extends ViewController {
     });
 
     this.updateWithDelay();
+
+    this.canvasController.canvas.addEventListener("pointerdown", (event) => {
+      this._onCanvasPointerDown(event);
+    });
   }
 
   initActions() {
@@ -378,6 +413,38 @@ export class EditorController extends ViewController {
         () => this.canLockGuideline(),
         () => this.getLockGuidelineLabel(this.selectionHasLockedGuidelines())
       );
+
+      registerAction(
+        "action.select-contour",
+        { topic: "0030-action-topics.menu.edit" },
+        () => {}
+      );
+
+      registerVisualizationLayerDefinition({
+        identifier: "fontra.select-contour-line",
+        name: "select-contour-line",
+        selectionFunc: glyphSelector("editing"),
+        userSwitchable: false,
+        defaultOn: true,
+        zIndex: 500,
+        screenParameters: { strokeWidth: 1 },
+        colors: { lineColor: "#0008" },
+        colorsDarkMode: { lineColor: "#FFF8" },
+        draw: (context, positionedGlyph, parameters, model, controller) => {
+          if (!this._contourSelectLine) return;
+          const { from, to } = this._contourSelectLine;
+          context.strokeStyle = parameters.lineColor;
+          context.lineWidth = parameters.strokeWidth;
+          context.setLineDash([4, 4]);
+          context.beginPath();
+          context.moveTo(from.x, from.y);
+          context.lineTo(to.x, to.y);
+          context.stroke();
+          context.setLineDash([]);
+        },
+      });
+
+
     }
 
     {
@@ -624,6 +691,170 @@ export class EditorController extends ViewController {
         );
       }
     }
+  }
+
+  async _onCanvasPointerDown(event) {
+    if (!event[commandKeyProperty] || !this.sceneSettings.selectedGlyph?.isEditing) {
+      return;
+    }
+
+    const positionedGlyph = this.sceneModel.getSelectedPositionedGlyph();
+    if (!positionedGlyph) return;
+
+    const glyphController = positionedGlyph.glyph;
+    const pathHitTester = glyphController.flattenedPathHitTester;
+    if (!pathHitTester) return;
+
+    event.stopImmediatePropagation();
+    event.preventDefault();
+
+    let activeSelection = event.shiftKey
+      ? new Set(this.sceneController.selection)
+      : new Set();
+
+    const getLocalPoint = (ev) => {
+      const pt = this.sceneController.localPoint(ev);
+      return { x: pt.x - positionedGlyph.x, y: pt.y - positionedGlyph.y };
+    };
+
+    const getHitPoint = (nearestHit) => {
+      const seg = nearestHit.segment;
+      const t = nearestHit.t;
+      if (!seg) return null;
+      if (seg.bezier?.point) {
+        const p = seg.bezier.point(t);
+        if (p && p.x !== undefined) return { x: p.x, y: p.y };
+      }
+      if (seg.bezier?.evaluate) {
+        const p = seg.bezier.evaluate(t);
+        if (p && p.x !== undefined) return { x: p.x, y: p.y };
+      }
+      const pts = seg.points ?? seg.bezier?.points;
+      if (pts) {
+        if (pts.length === 2) {
+          return {
+            x: pts[0].x + (pts[1].x - pts[0].x) * t,
+            y: pts[0].y + (pts[1].y - pts[0].y) * t,
+          };
+        } else if (pts.length === 3) {
+          const mt = 1 - t;
+          return {
+            x: mt*mt*pts[0].x + 2*mt*t*pts[1].x + t*t*pts[2].x,
+            y: mt*mt*pts[0].y + 2*mt*t*pts[1].y + t*t*pts[2].y,
+          };
+        } else if (pts.length === 4) {
+          const mt = 1 - t;
+          return {
+            x: mt*mt*mt*pts[0].x + 3*mt*mt*t*pts[1].x + 3*mt*t*t*pts[2].x + t*t*t*pts[3].x,
+            y: mt*mt*mt*pts[0].y + 3*mt*mt*t*pts[1].y + 3*mt*t*t*pts[2].y + t*t*t*pts[3].y,
+          };
+        }
+      }
+      return null;
+    };
+
+    const getContourPointRange = (contourIndex) => {
+      const path = glyphController.instance.path;
+      const contourInfo = path.contourInfo;
+      const contourStart = contourIndex === 0
+        ? 0
+        : contourInfo[contourIndex - 1].endPoint + 1;
+      const contourEnd = contourInfo[contourIndex].endPoint;
+      return { path, contourStart, contourEnd };
+    };
+
+    const addContourToSelection = (contourIndex, selectionSet) => {
+      const { path, contourStart, contourEnd } = getContourPointRange(contourIndex);
+      for (let i = contourStart; i <= contourEnd; i++) {
+        const pointType = path.pointTypes[i] & VarPackedPath.POINT_TYPE_MASK;
+        if (pointType === VarPackedPath.ON_CURVE) {
+          selectionSet.add(`point/${i}`);
+        }
+      }
+    };
+
+    const removeContourFromSelection = (contourIndex, selectionSet) => {
+      const { path, contourStart, contourEnd } = getContourPointRange(contourIndex);
+      for (let i = contourStart; i <= contourEnd; i++) {
+        selectionSet.delete(`point/${i}`);
+      }
+    };
+
+    const isContourFullySelected = (contourIndex, selectionSet) => {
+      const { path, contourStart, contourEnd } = getContourPointRange(contourIndex);
+      for (let i = contourStart; i <= contourEnd; i++) {
+        const pointType = path.pointTypes[i] & VarPackedPath.POINT_TYPE_MASK;
+        if (pointType === VarPackedPath.ON_CURVE) {
+          if (!selectionSet.has(`point/${i}`)) return false;
+        }
+      }
+      return true;
+    };
+
+    const selectContourAtPoint = (localPoint, selectionSet, allowDeselect = false) => {
+      const nearestHit = pathHitTester.findNearest(localPoint);
+      if (!nearestHit) return { hitPoint: null, contourIndex: null };
+      const contourIndex = nearestHit.contourIndex;
+      if (allowDeselect && isContourFullySelected(contourIndex, selectionSet)) {
+        removeContourFromSelection(contourIndex, selectionSet);
+      } else {
+        addContourToSelection(contourIndex, selectionSet);
+      }
+      return { hitPoint: getHitPoint(nearestHit) ?? localPoint, contourIndex };
+    };
+
+    const initialLocal = getLocalPoint(event);
+    const { hitPoint } = selectContourAtPoint(initialLocal, activeSelection, true);
+
+    if (hitPoint) {
+      selectContourLineState = { from: initialLocal, to: hitPoint };
+    }
+
+    this.sceneController.selection = new Set(activeSelection);
+    this.canvasController.requestUpdate();
+
+    let dragSelection = new Set(activeSelection);
+
+    const onPointerMove = (moveEvent) => {
+      if (!moveEvent[commandKeyProperty]) {
+        cleanup();
+        return;
+      }
+
+      const localPoint = getLocalPoint(moveEvent);
+
+      const nearestHit = pathHitTester.findNearest(localPoint);
+      let hitPt = localPoint;
+
+      if (nearestHit) {
+        hitPt = getHitPoint(nearestHit) ?? localPoint;
+        addContourToSelection(nearestHit.contourIndex, dragSelection);
+      }
+
+      selectContourLineState = { from: localPoint, to: hitPt };
+      this.sceneController.selection = moveEvent.shiftKey
+        ? new Set([...this.sceneController.selection, ...dragSelection])
+        : new Set(dragSelection);
+      this.canvasController.requestUpdate();
+    };
+
+    const onPointerUp = (upEvent) => {
+      cleanup();
+      const finalSelection = upEvent.shiftKey
+        ? new Set([...this.sceneController.selection, ...activeSelection])
+        : new Set(this.sceneController.selection);
+      this.sceneController.selection = finalSelection;
+      selectContourLineState = null;
+      this.canvasController.requestUpdate();
+    };
+
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
   }
 
   initActionsAfterStart() {
