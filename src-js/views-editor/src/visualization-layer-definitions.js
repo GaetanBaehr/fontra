@@ -204,6 +204,190 @@ registerVisualizationLayerDefinition({
 });
 
 registerVisualizationLayerDefinition({
+  identifier: "fontra.speedpunk",
+  name: "speedpunk",
+  selectionFunc: glyphSelector("editing"),
+  userSwitchable: true,
+  defaultOn: true,
+  zIndex: 100,
+  screenParameters: { strokeWidth: 1 },
+  colors: {
+    strokeColor: "#0004",
+    zoneColor: "#00BFFF18",
+    zoneStrokeColor: "#00608018",
+  },
+  colorsDarkMode: {
+    strokeColor: "#FFF6",
+    zoneColor: "#00BFFF18",
+    zoneStrokeColor: "#80DFFF18",
+  },
+
+  draw: (context, positionedGlyph, parameters, model, controller) => {
+    const coords = positionedGlyph.glyph.instance.path.coordinates;
+    const types = positionedGlyph.glyph.instance.path.pointTypes;
+    const contourInfo = positionedGlyph.glyph.instance.path.contourInfo;
+
+    // ---- Helpers ----
+    function lerp(a, b, t) { return a + (b - a) * t; }
+    function lerpPt(p0, p1, t) {
+      return { x: lerp(p0.x, p1.x, t), y: lerp(p0.y, p1.y, t) };
+    }
+    function normalize(v) {
+      const len = Math.hypot(v.x, v.y);
+      return len === 0 ? { x: 0, y: 0 } : { x: v.x / len, y: v.y / len };
+    }
+    function cross(ax, ay, bx, by) { return ax * by - ay * bx; }
+
+    // Quadratic
+    function B_quad(t, P) {
+      const a = lerpPt(P[0], P[1], t);
+      const b = lerpPt(P[1], P[2], t);
+      return lerpPt(a, b, t);
+    }
+    function dB_quad(t, P) {
+      return {
+        x: 2 * (1 - t) * (P[1].x - P[0].x) + 2 * t * (P[2].x - P[1].x),
+        y: 2 * (1 - t) * (P[1].y - P[0].y) + 2 * t * (P[2].y - P[1].y),
+      };
+    }
+    function ddB_quad(t, P) {
+      return {
+        x: 2 * (P[2].x - 2 * P[1].x + P[0].x),
+        y: 2 * (P[2].y - 2 * P[1].y + P[0].y),
+      };
+    }
+
+    // Cubic
+    function B_cubic(t, P) {
+      const mt = 1 - t;
+      return {
+        x: mt*mt*mt*P[0].x + 3*mt*mt*t*P[1].x + 3*mt*t*t*P[2].x + t*t*t*P[3].x,
+        y: mt*mt*mt*P[0].y + 3*mt*mt*t*P[1].y + 3*mt*t*t*P[2].y + t*t*t*P[3].y,
+      };
+    }
+    function dB_cubic(t, P) {
+      const mt = 1 - t;
+      return {
+        x: 3*mt*mt*(P[1].x-P[0].x) + 6*mt*t*(P[2].x-P[1].x) + 3*t*t*(P[3].x-P[2].x),
+        y: 3*mt*mt*(P[1].y-P[0].y) + 6*mt*t*(P[2].y-P[1].y) + 3*t*t*(P[3].y-P[2].y),
+      };
+    }
+    function ddB_cubic(t, P) {
+      const mt = 1 - t;
+      return {
+        x: 6*mt*(P[2].x-2*P[1].x+P[0].x) + 6*t*(P[3].x-2*P[2].x+P[1].x),
+        y: 6*mt*(P[2].y-2*P[1].y+P[0].y) + 6*t*(P[3].y-2*P[2].y+P[1].y),
+      };
+    }
+
+    // ---- Segments ----
+    function pushSegment(segments, from, offs, to) {
+      if (offs.length === 0) {
+        segments.push({ kind: "line", pts: [from, to] });
+      } else if (offs.length === 1) {
+        segments.push({ kind: "quad", pts: [from, offs[0], to] });
+      } else if (offs.length === 2) {
+        segments.push({ kind: "cubic", pts: [from, offs[0], offs[1], to] });
+      }
+    }
+
+    function buildSegments(coords, types, contourInfo) {
+      const points = [];
+      for (let i = 0; i < coords.length; i += 2) {
+        points.push({ x: coords[i], y: coords[i + 1], type: types[i / 2] });
+      }
+
+      const allSegments = [];
+      let contourStart = 0;
+
+      for (const { endPoint } of contourInfo) {
+        const contourPoints = points.slice(contourStart, endPoint + 1);
+        contourStart = endPoint + 1;
+
+        const segments = [];
+        let firstOnIdx = -1;   // index dans contourPoints
+        let currentOnIdx = -1;
+        let offPoints = [];
+
+        for (let i = 0; i < contourPoints.length; i++) {
+          const pt = contourPoints[i];
+          if (pt.type === 2) {
+            offPoints.push(pt);
+          } else {
+            if (firstOnIdx === -1) {
+              firstOnIdx = i;
+              currentOnIdx = i;
+            } else {
+              pushSegment(segments, contourPoints[currentOnIdx], offPoints, pt);
+              currentOnIdx = i;
+              offPoints = [];
+            }
+          }
+        }
+
+        // Fermeture : on relie le dernier on-curve au premier, seulement si
+        // ce sont bien deux points distincts (contour non dégénéré)
+        if (firstOnIdx !== -1 && currentOnIdx !== firstOnIdx) {
+          pushSegment(
+            segments,
+            contourPoints[currentOnIdx],
+            offPoints,
+            contourPoints[firstOnIdx]
+          );
+        }
+
+        allSegments.push(...segments);
+      }
+
+      return allSegments;
+    }
+
+    // ---- Rendu ----
+    function renderBezierSegment(seg) {
+      const N = 300;
+      for (let i = 0; i <= N; i++) {
+        const t = i / N;
+        let q, dq, ddq;
+        if (seg.kind === "quad") {
+          q   = B_quad(t, seg.pts);
+          dq  = dB_quad(t, seg.pts);
+          ddq = ddB_quad(t, seg.pts);
+        } else if (seg.kind === "cubic") {
+          q   = B_cubic(t, seg.pts);
+          dq  = dB_cubic(t, seg.pts);
+          ddq = ddB_cubic(t, seg.pts);
+        } else {
+          continue;
+        }
+
+        const vlen = Math.hypot(dq.x, dq.y);
+        const num  = Math.abs(cross(dq.x, dq.y, ddq.x, ddq.y));
+        const denom = Math.pow(Math.max(vlen, 1e-9), 3);
+        const kappa = denom === 0 ? 0 : num / denom;
+
+        const L = 40 * (kappa / (kappa + 0.002));
+        const nvec = normalize({ x: -dq.y, y: dq.x });
+
+        const hue = Math.max(0, Math.min(360, 280 - (Math.log(kappa + 1e-8) + 8) * 32));
+        context.strokeStyle = `hsl(${hue} 90% 60%)`;
+
+        context.beginPath();
+        context.moveTo(q.x, q.y);
+        context.lineTo(q.x - nvec.x * L, q.y - nvec.y * L);
+        context.stroke();
+      }
+    }
+
+    // ---- Main ----
+    context.lineWidth = parameters.strokeWidth;
+    const segments = buildSegments(coords, types, contourInfo);
+    for (const seg of segments) {
+      renderBezierSegment(seg);
+    }
+  },
+});
+
+registerVisualizationLayerDefinition({
   identifier: "fontra.lineMetrics",
   name: "sidebar.user-settings.line-metrics",
   selectionFunc: glyphSelector("editing"),
