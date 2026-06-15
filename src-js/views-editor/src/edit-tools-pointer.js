@@ -746,7 +746,7 @@ function getSelectModeFunction(event) {
   return event.shiftKey
     ? event[commandKeyProperty]
       ? difference
-      : union
+      : symmetricDifference
     : event[commandKeyProperty]
     ? union
     : replace;
